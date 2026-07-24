@@ -1,360 +1,116 @@
-"""
-NutriML-Pareja — Sistema predictivo con Machine Learning
-Evaluación nutricional preconcepcional en parejas
-Predicción de salud en la progenie — Juliaca 2026
-Universidad Nacional de Juliaca (UNAJ)
-Autor: Condori Ccosi Vidal
-"""
+# NutriML-Pareja — App Streamlit (configuración final: 22 variables, 6 salidas)
+# Prueba de concepto: los modelos se entrenan sobre datos SIMULADOS fundamentados
+# en la literatura (semilla 42). NO usar para decisiones clínicas.
+import numpy as np, pandas as pd, streamlit as st
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
 
-import streamlit as st
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import joblib
-import shap
-import warnings
-warnings.filterwarnings('ignore')
+st.set_page_config(page_title="NutriML-Pareja", page_icon="🧬", layout="wide")
 
-# ── CONFIGURACIÓN DE PÁGINA ────────────────────────────────────────────────
-st.set_page_config(
-    page_title="NutriML-Pareja | UNAJ Juliaca",
-    page_icon="🤰",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+FEATS = ["edad_m","paridad","imc_m","gp","hb_m","ferritina","glu_m","hba1c_m","folico_sup","talla_m",
+         "ant_ptr","pa_alta","infec","edad_p","imc_p","hb_p","glu_p","diet_p","conc_p","mot_p","morf_p","talla_p"]
+LABELS = {"y_peso":["Bajo peso","Adecuado","Macrosomía"], "y_eg":["Pretérmino","A término"],
+          "y_pesoEG":["PEG","AEG","GEG"], "y_talla":["Talla baja","Adecuada","Talla alta"],
+          "y_apgar":["Deprimido","Vigoroso"], "y_viab":["Pérdida / no logro","Viable"]}
+TITLES = {"y_peso":"Peso al nacer","y_eg":"Edad gestacional","y_pesoEG":"Peso para la edad gestacional",
+          "y_talla":"Talla al nacer","y_apgar":"APGAR","y_viab":"Viabilidad / logro de embarazo"}
+NORMAL_IDX = {"y_peso":1,"y_eg":1,"y_pesoEG":1,"y_talla":1,"y_apgar":1,"y_viab":1}
 
-# ── CSS PERSONALIZADO ──────────────────────────────────────────────────────
-st.markdown("""
-<style>
-    .titulo-sistema {
-        font-size: 1.8rem; font-weight: 700; color: #1a5276;
-        text-align: center; margin-bottom: 0.2rem;
-    }
-    .subtitulo {
-        font-size: 1rem; color: #5d6d7e;
-        text-align: center; margin-bottom: 1.5rem;
-    }
-    .seccion-madre {
-        background: #eaf4fb; border-left: 4px solid #2980b9;
-        border-radius: 8px; padding: 1rem; margin-bottom: 1rem;
-    }
-    .seccion-padre {
-        background: #eafaf1; border-left: 4px solid #27ae60;
-        border-radius: 8px; padding: 1rem; margin-bottom: 1rem;
-    }
-    .resultado-alto   { background:#fdedec; border:2px solid #e74c3c;
-                        border-radius:10px; padding:1rem; text-align:center; }
-    .resultado-medio  { background:#fef9e7; border:2px solid #f39c12;
-                        border-radius:10px; padding:1rem; text-align:center; }
-    .resultado-bajo   { background:#eafaf1; border:2px solid #27ae60;
-                        border-radius:10px; padding:1rem; text-align:center; }
-    .metrica-box { background:#f8f9fa; border-radius:8px; padding:0.7rem;
-                   text-align:center; border:1px solid #dee2e6; }
-    .altitud-nota { background:#fff3cd; border:1px solid #ffc107;
-                    border-radius:6px; padding:0.5rem; font-size:0.85rem; }
-</style>
-""", unsafe_allow_html=True)
+@st.cache_resource(show_spinner="Entrenando modelos (una sola vez)…")
+def train():
+    SEED=42; rng=np.random.default_rng(SEED); np.random.seed(SEED); N=470
+    z=lambda a:(a-np.nanmean(a))/np.nanstd(a)
+    edad_m=np.clip(rng.normal(27,4.5,N),18,35); edad_p=np.clip(edad_m+rng.normal(2.5,3,N),18,40)
+    paridad=rng.poisson(1.1,N).clip(0,5); imc_m=np.clip(rng.normal(26.4,4.6,N),16.5,41); imc_p=np.clip(rng.normal(25.7,3.9,N),17,39)
+    hb_m=np.clip(rng.normal(13.4,1.3,N),9,16.5); hb_p=np.clip(rng.normal(15.2,1.5,N),11,18.5)
+    ferritina=np.clip(rng.gamma(2.4,9.5,N),3,90); gp=np.clip(rng.gamma(9,1.2,N),2.5,22)
+    diet_p=np.clip(rng.normal(6,1.8,N),1,10); folico_sup=(rng.random(N)<0.6).astype(int)
+    glu_m=np.clip(rng.normal(86,9,N)+(rng.random(N)<0.1)*rng.normal(38,12,N),60,220)
+    hba1c_m=np.clip(2.6+0.031*glu_m+rng.normal(0,0.25,N),4.2,10.5)
+    glu_p=np.clip(rng.normal(88,10,N)+(rng.random(N)<0.1)*rng.normal(35,12,N),60,220)
+    conc_p=np.clip(rng.normal(45,25,N),2,150); mot_p=np.clip(rng.normal(48,14,N),5,85); morf_p=np.clip(rng.normal(6,2.2,N),0,18)
+    spz=((conc_p-45)/25+(mot_p-48)/14+(morf_p-6)/2.2)/3
+    talla_m=np.clip(rng.normal(152,6,N),138,172); talla_p=np.clip(rng.normal(163,7,N),146,186)
+    ant_ptr=(rng.random(N)<0.15).astype(int); pa_alta=(rng.random(N)<0.11).astype(int); infec=(rng.random(N)<0.20).astype(int)
+    z_gp=z(gp); z_imcm=z(imc_m); z_hbm=(hb_m-13.4)/1.3; z_ferr=z(ferritina); z_imcp=z(imc_p); z_glu=z(glu_m); z_tm=z(talla_m); z_tp=z(talla_p)
+    vlogit=1.9+2.4*spz-0.6*((edad_m>35).astype(float))-0.5*z(hba1c_m)-0.4*((imc_m>=30).astype(float))-0.3*z(edad_p)
+    y_viab=(rng.random(N)<1/(1+np.exp(-vlogit))).astype(int)
+    eg=np.clip(39.2+0.35*z_gp+0.15*z_hbm-0.2*np.abs(z_imcm)+0.12*folico_sup+0.10*spz-1.9*ant_ptr-1.3*infec-1.1*pa_alta+rng.normal(0,1.0,N),30,41.5)
+    peso=np.clip(3250+210*z_gp+150*z_imcm+120*z_hbm+80*z_ferr+70*z_imcp+120*z_glu+30*spz-140*pa_alta+30*z_tm+18*z_tp+195*(eg-38.8)+rng.normal(0,290,N),1400,4750)
+    talla=np.clip(48+0.0022*(peso-3200)+0.8*(eg-38.8)+0.9*z_tm+0.7*z_tp+rng.normal(0,1.2,N),40,56)
+    apgar1=np.clip(np.round(9.0+0.5*(eg-38.8)+0.0008*(peso-3200)-0.4*pa_alta+rng.normal(0,1.3,N)),1,10)
+    df=pd.DataFrame(dict(edad_m=edad_m,paridad=paridad,imc_m=imc_m,gp=gp,hb_m=hb_m,ferritina=ferritina,glu_m=glu_m,hba1c_m=hba1c_m,
+     folico_sup=folico_sup,talla_m=talla_m,ant_ptr=ant_ptr,pa_alta=pa_alta,infec=infec,edad_p=edad_p,imc_p=imc_p,hb_p=hb_p,glu_p=glu_p,
+     diet_p=diet_p,conc_p=conc_p,mot_p=mot_p,morf_p=morf_p,talla_p=talla_p,peso=peso,eg=eg,talla=talla,apgar1=apgar1,y_viab=y_viab))
+    df=df.drop(index=rng.choice(N,N-424,replace=False)).reset_index(drop=True)
+    df["y_peso"]=df.peso.apply(lambda g:0 if g<2500 else(2 if g>=4000 else 1))
+    df["y_eg"]=df.eg.apply(lambda s:0 if s<37 else 1)
+    df["y_talla"]=df.talla.apply(lambda t:0 if t<47 else(2 if t>=53 else 1))
+    df["y_apgar"]=df.apgar1.apply(lambda a:0 if a<=6 else 1)
+    bb=np.polyfit(df.eg,df.peso,1); res=df.peso-np.polyval(bb,df.eg); p10,p90=np.percentile(res,[10,90])
+    df["y_pesoEG"]=res.apply(lambda r:0 if r<p10 else(2 if r>p90 else 1))
+    models={}
+    for col in LABELS:
+        models[col]=Pipeline([("imp",SimpleImputer(strategy="median")),("sc",StandardScaler()),
+            ("clf",RandomForestClassifier(n_estimators=250,max_depth=10,class_weight="balanced",random_state=SEED))]).fit(df[FEATS],df[col].values)
+    return models
 
-# ── CONSTANTE ALTITUD ──────────────────────────────────────────────────────
-FACTOR_OPS = 2.0  # g/dL — corrección OPS para Juliaca 3824 m s.n.m.
+models = train()
 
-# ── CARGAR MODELOS ─────────────────────────────────────────────────────────
-@st.cache_resource
-def cargar_modelos():
-    modelos = joblib.load('modelos.pkl')
-    prepro  = joblib.load('preprocesador.pkl')
-    return modelos, prepro
+st.title("🧬 NutriML-Pareja")
+st.caption("Sistema predictivo con Machine Learning para la evaluación nutricional y clínica preconcepcional de la pareja — Juliaca, altiplano peruano.")
+st.warning("⚠️ Prueba de concepto entrenada con **datos simulados** fundamentados en la literatura. No debe usarse para decisiones clínicas hasta su validación con datos reales.")
 
-modelos, prepro = cargar_modelos()
+with st.form("perfil"):
+    cM, cP = st.columns(2)
+    with cM:
+        st.subheader("👩 Madre")
+        edad_m=st.number_input("Edad (años)",18,45,27)
+        paridad=st.number_input("Paridad (embarazos previos)",0,8,1)
+        imc_m=st.number_input("IMC preconcepcional (kg/m²)",15.0,45.0,24.0,0.1)
+        gp=st.number_input("Ganancia de peso pregestacional (kg)",0.0,30.0,11.0,0.1)
+        hb_m=st.number_input("Hemoglobina AJUSTADA por altitud (g/dL)",8.0,18.0,13.5,0.1)
+        ferritina=st.number_input("Ferritina (µg/L)",3.0,150.0,25.0,0.5)
+        glu_m=st.number_input("Glucosa en ayunas (mg/dL)",60,260,85)
+        hba1c_m=st.number_input("HbA1c (%)",4.0,12.0,5.2,0.1)
+        folico_sup=1 if st.selectbox("Suplementación de ácido fólico",["Sí","No"])=="Sí" else 0
+        talla_m=st.number_input("Talla materna (cm)",135,185,152)
+        ant_ptr=1 if st.selectbox("Antecedente de parto pretérmino / aborto",["No","Sí"])=="Sí" else 0
+        pa_alta=1 if st.selectbox("Presión arterial",["Normal","Elevada / HTA"])=="Elevada / HTA" else 0
+        infec=1 if st.selectbox("Tamizaje de infección (ITU / vaginosis)",["Negativo","Positivo"])=="Positivo" else 0
+    with cP:
+        st.subheader("👨 Padre")
+        edad_p=st.number_input("Edad (años) ",18,60,30)
+        imc_p=st.number_input("IMC (kg/m²)",15.0,45.0,25.0,0.1)
+        hb_p=st.number_input("Hemoglobina AJUSTADA por altitud (g/dL) ",10.0,20.0,15.2,0.1)
+        glu_p=st.number_input("Glucosa en ayunas (mg/dL) ",60,260,88)
+        diet_p=st.number_input("Diversidad dietética (n.º grupos)",0,10,6)
+        conc_p=st.number_input("Concentración espermática (mill/mL)",0.0,200.0,45.0,1.0)
+        mot_p=st.number_input("Motilidad progresiva (%)",0.0,100.0,48.0,1.0)
+        morf_p=st.number_input("Morfología normal (%)",0.0,25.0,6.0,0.1)
+        talla_p=st.number_input("Talla paterna (cm)",145,205,165)
+    enviar=st.form_submit_button("🔮 Predecir salud de la progenie", use_container_width=True)
 
-NOMBRES_ALGORITMOS = list(modelos.keys())
-COLORES_ALGO = {
-    'Árbol de Decisión':   '#95a5a6',
-    'Regresión Logística': '#3498db',
-    'SVM':                 '#1abc9c',
-    'Random Forest':       '#9b59b6',
-    'XGBoost':             '#e67e22',
-}
+if enviar:
+    row=pd.DataFrame([[edad_m,paridad,imc_m,gp,hb_m,ferritina,glu_m,hba1c_m,folico_sup,talla_m,ant_ptr,pa_alta,infec,
+        edad_p,imc_p,hb_p,glu_p,diet_p,conc_p,mot_p,morf_p,talla_p]],columns=FEATS)
+    st.subheader("📋 Panel de riesgo del neonato")
+    cols=st.columns(3)
+    for i,col in enumerate(["y_peso","y_eg","y_pesoEG","y_talla","y_apgar","y_viab"]):
+        proba=models[col].predict_proba(row)[0]; classes=models[col].named_steps["clf"].classes_
+        p={LABELS[col][c]:float(proba[j]) for j,c in enumerate(classes)}
+        pred=max(p,key=p.get)
+        p_normal=p.get(LABELS[col][NORMAL_IDX[col]],0.0); risk=1-p_normal
+        color="🟢" if risk<0.15 else ("🟡" if risk<0.35 else "🔴")
+        with cols[i%3]:
+            st.markdown(f"**{color} {TITLES[col]}**")
+            st.markdown(f"Predicción: **{pred}**")
+            for k,v in sorted(p.items(),key=lambda x:-x[1]):
+                st.progress(min(v,1.0), text=f"{k}: {v*100:.1f}%")
+            st.divider()
+    st.info("La hemoglobina debe ingresarse ya **ajustada por altitud** (factor OMS/OPS ≈ −3 g/dL para 3 824 m). "
+            "El APGAR es una salida secundaria (depende de factores intraparto). Semáforo: 🟢 riesgo bajo · 🟡 moderado · 🔴 alto.")
 
-FEATURES = [
-    'imc_materno','hb_materna_ajust','ferritina','acido_folico','zinc',
-    'ganancia_peso','edad_materna','paridad',
-    'imc_paterno','hb_paterna_ajust','edad_paterna','divers_dietetica',
-]
-FEATURES_ES = [
-    'IMC materno (kg/m²)','Hb materna ajustada (g/dL)','Ferritina (μg/L)',
-    'Ácido fólico (nmol/L)','Zinc sérico (μg/dL)','Ganancia de peso (kg)',
-    'Edad materna (años)','Paridad',
-    'IMC paterno (kg/m²)','Hb paterna ajustada (g/dL)',
-    'Edad paterna (años)','Diversidad dietética paterna (0-10)',
-]
-
-CLASES = ['Bajo peso al nacer (BPN)', 'Peso adecuado', 'Macrosomía']
-EMOJIS = ['⚠️', '✅', '⚠️']
-COLORES_CLASE = ['#e74c3c', '#27ae60', '#f39c12']
-
-# ── ENCABEZADO ─────────────────────────────────────────────────────────────
-st.markdown('<p class="titulo-sistema">🤰 NutriML-Pareja</p>', unsafe_allow_html=True)
-st.markdown(
-    '<p class="subtitulo">Sistema predictivo con Machine Learning · '
-    'Evaluación nutricional preconcepcional en parejas · '
-    'Universidad Nacional de Juliaca — 2026</p>',
-    unsafe_allow_html=True
-)
-st.markdown(
-    '<div class="altitud-nota">🏔️ <b>Juliaca, 3 824 m s. n. m.</b> — '
-    'Los valores de hemoglobina se corrigen automáticamente con el '
-    'factor de ajuste OPS/OMS (−2,0 g/dL) para esta altitud.</div>',
-    unsafe_allow_html=True
-)
-st.markdown("---")
-
-# ── SIDEBAR — SELECCIÓN DE ALGORITMO ──────────────────────────────────────
-with st.sidebar:
-    st.header("⚙️ Configuración")
-    algoritmo = st.selectbox(
-        "Algoritmo ML:",
-        NOMBRES_ALGORITMOS,
-        index=2,  # SVM por defecto (mejor modelo)
-        help="SVM obtuvo el mejor F1-Score (0.736) en el pipeline ejecutado"
-    )
-    st.markdown(f"""
-    **Métricas del modelo seleccionado:**
-    | Métrica | Valor |
-    |---------|-------|
-    | F1-Score | 0.736 |
-    | Accuracy | 76.5% |
-    | AUC-ROC | 0.543 |
-    """)
-    st.markdown("---")
-    st.markdown("**Acerca del sistema:**")
-    st.caption(
-        "NutriML-Pareja predice el peso al nacer de la progenie "
-        "a partir del estado nutricional preconcepcional de ambos "
-        "miembros de la pareja. Desarrollado como tesis de pregrado "
-        "en Ingeniería de Software y Sistemas — UNAJ."
-    )
-    st.caption("⚠️ Herramienta de apoyo diagnóstico. No reemplaza el criterio clínico.")
-
-# ── FORMULARIO DIVIDIDO EN 3 COLUMNAS ─────────────────────────────────────
-st.subheader("📋 Datos de la pareja preconcepcional")
-
-col1, col2, col3 = st.columns([1, 1, 1])
-
-# — COLUMNA 1: Variables maternas antropométricas —
-with col1:
-    st.markdown('<div class="seccion-madre">', unsafe_allow_html=True)
-    st.markdown("**🩺 Madre — Antropometría**")
-
-    peso_m = st.number_input("Peso materno (kg)", 35.0, 120.0, 65.0, 0.1)
-    talla_m = st.number_input("Talla materna (cm)", 140.0, 185.0, 158.0, 0.5)
-    imc_materno = round(peso_m / (talla_m/100)**2, 1)
-    st.metric("IMC materno calculado", f"{imc_materno} kg/m²",
-              delta="Normal" if 18.5<=imc_materno<25 else
-                    "Sobrepeso" if 25<=imc_materno<30 else
-                    "Obesidad" if imc_materno>=30 else "Delgadez")
-
-    ganancia_peso = st.slider("Ganancia de peso pregestacional (kg)", 0.0, 25.0, 10.9, 0.1)
-    edad_materna  = st.number_input("Edad materna (años)", 18, 35, 27)
-    paridad       = st.selectbox("Paridad (embarazos previos)", [0, 1, 2, 3],
-                                  format_func=lambda x: f"{x} {'(nulípara)' if x==0 else 'previo(s)'}")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# — COLUMNA 2: Variables maternas bioquímicas + paternas —
-with col2:
-    st.markdown('<div class="seccion-madre">', unsafe_allow_html=True)
-    st.markdown("**🔬 Madre — Bioquímica**")
-
-    hb_materna_medida = st.number_input("Hemoglobina materna medida (g/dL)", 7.0, 18.0, 14.4, 0.1,
-                                         help="Valor del laboratorio, sin ajuste por altitud")
-    hb_materna_ajust  = round(hb_materna_medida - FACTOR_OPS, 1)
-    anemia_m = hb_materna_medida < (12.0 + FACTOR_OPS)
-    st.metric("Hb ajustada por altitud", f"{hb_materna_ajust} g/dL",
-              delta="⚠️ Anemia" if anemia_m else "Normal",
-              delta_color="inverse" if anemia_m else "normal")
-
-    ferritina  = st.number_input("Ferritina sérica (μg/L)", 2.0, 100.0, 22.3, 0.5)
-    acido_folico = st.number_input("Ácido fólico eritrocitario (nmol/L)", 100.0, 800.0, 348.6, 1.0)
-    zinc       = st.number_input("Zinc sérico (μg/dL)", 30.0, 130.0, 68.4, 0.5)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# — COLUMNA 3: Variables paternas —
-with col3:
-    st.markdown('<div class="seccion-padre">', unsafe_allow_html=True)
-    st.markdown("**👨 Padre — Variables preconcepcionales**")
-
-    peso_p  = st.number_input("Peso paterno (kg)", 45.0, 130.0, 72.0, 0.1)
-    talla_p = st.number_input("Talla paterna (cm)", 150.0, 195.0, 168.0, 0.5)
-    imc_paterno = round(peso_p / (talla_p/100)**2, 1)
-    st.metric("IMC paterno calculado", f"{imc_paterno} kg/m²",
-              delta="Normal" if 18.5<=imc_paterno<25 else
-                    "Sobrepeso" if 25<=imc_paterno<30 else
-                    "Obesidad" if imc_paterno>=30 else "Delgadez")
-
-    hb_paterna_medida = st.number_input("Hemoglobina paterna medida (g/dL)", 9.0, 20.0, 16.2, 0.1)
-    hb_paterna_ajust  = round(hb_paterna_medida - FACTOR_OPS, 1)
-    anemia_p = hb_paterna_medida < (13.0 + FACTOR_OPS)
-    st.metric("Hb paterna ajustada", f"{hb_paterna_ajust} g/dL",
-              delta="⚠️ Anemia" if anemia_p else "Normal",
-              delta_color="inverse" if anemia_p else "normal")
-
-    edad_paterna  = st.number_input("Edad paterna (años)", 18, 50, 30)
-    divers_dietetica = st.slider("Diversidad dietética paterna (0–10)", 0.0, 10.0, 6.2, 0.1,
-                                  help="0=dieta muy pobre, 10=dieta muy diversa")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# ── BOTÓN DE PREDICCIÓN ─────────────────────────────────────────────────────
-st.markdown("---")
-col_btn = st.columns([1, 2, 1])
-with col_btn[1]:
-    predecir = st.button("🔍 Predecir salud en la progenie",
-                          use_container_width=True, type="primary")
-
-# ── PREDICCIÓN Y RESULTADOS ─────────────────────────────────────────────────
-if predecir:
-    # Vector de entrada
-    X_input = np.array([[
-        imc_materno, hb_materna_ajust, ferritina, acido_folico, zinc,
-        ganancia_peso, float(edad_materna), float(paridad),
-        imc_paterno, hb_paterna_ajust, float(edad_paterna), divers_dietetica
-    ]])
-
-    X_pp = prepro.transform(X_input)
-    modelo_sel = modelos[algoritmo]
-    pred_clase = modelo_sel.predict(X_pp)[0]
-    pred_proba = modelo_sel.predict_proba(X_pp)[0]
-
-    st.markdown("## 📊 Resultados de la predicción")
-
-    # — RESULTADO PRINCIPAL —
-    clase_nombre = CLASES[pred_clase]
-    prob_pred    = pred_proba[pred_clase] * 100
-    emoji        = EMOJIS[pred_clase]
-    color_div    = ['resultado-alto', 'resultado-bajo', 'resultado-medio'][pred_clase]
-
-    st.markdown(f"""
-    <div class="{color_div}">
-        <h2>{emoji} {clase_nombre}</h2>
-        <p style="font-size:1.3rem;">Probabilidad: <b>{prob_pred:.1f}%</b></p>
-        <p style="color:#5d6d7e;">Algoritmo: {algoritmo}</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("")
-
-    # — PROBABILIDADES POR CLASE —
-    col_p1, col_p2, col_p3 = st.columns(3)
-    for col, clase, prob, color in zip(
-        [col_p1, col_p2, col_p3], CLASES, pred_proba, COLORES_CLASE
-    ):
-        with col:
-            st.markdown(f"""
-            <div class="metrica-box">
-                <div style="font-size:1.5rem;font-weight:700;color:{color}">
-                    {prob*100:.1f}%
-                </div>
-                <div style="font-size:0.85rem;color:#5d6d7e;">{clase}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # — DOS COLUMNAS: Gráfico probabilidades + SHAP —
-    col_g1, col_g2 = st.columns(2)
-
-    with col_g1:
-        st.subheader("📈 Probabilidades por clase")
-        fig1, ax1 = plt.subplots(figsize=(5, 3))
-        bars = ax1.barh(CLASES, pred_proba*100,
-                        color=COLORES_CLASE, edgecolor='white',
-                        linewidth=0.5, height=0.5)
-        ax1.set_xlim(0, 100)
-        ax1.set_xlabel("Probabilidad (%)", fontsize=10)
-        for bar, val in zip(bars, pred_proba*100):
-            ax1.text(val+1, bar.get_y()+bar.get_height()/2,
-                     f'{val:.1f}%', va='center', fontsize=10)
-        ax1.axvline(50, color='gray', linestyle='--', lw=0.8, alpha=0.5)
-        ax1.spines['top'].set_visible(False)
-        ax1.spines['right'].set_visible(False)
-        plt.tight_layout()
-        st.pyplot(fig1)
-        plt.close()
-
-    with col_g2:
-        st.subheader("🔎 Importancia de variables (SHAP)")
-        try:
-            explainer   = shap.TreeExplainer(modelos['XGBoost'])
-            shap_vals   = explainer.shap_values(X_pp)
-            sm = shap_vals if isinstance(shap_vals, list) else \
-                 [shap_vals[:,:,i] for i in range(shap_vals.shape[2])]
-            sv_clase = sm[pred_clase][0]
-            idx_ord  = np.argsort(np.abs(sv_clase))
-
-            fig2, ax2 = plt.subplots(figsize=(5, 4))
-            colores_shap = ['#e74c3c' if 'patern' in FEATURES_ES[i].lower()
-                            else '#3498db' for i in idx_ord]
-            ax2.barh([FEATURES_ES[i] for i in idx_ord],
-                     sv_clase[idx_ord],
-                     color=colores_shap, edgecolor='white',
-                     linewidth=0.4, height=0.6)
-            ax2.axvline(0, color='black', lw=0.8)
-            ax2.set_xlabel("Valor SHAP (impacto en predicción)", fontsize=9)
-            ax2.tick_params(axis='y', labelsize=7.5)
-            ax2.legend(handles=[
-                mpatches.Patch(color='#3498db', label='Variable materna'),
-                mpatches.Patch(color='#e74c3c', label='Variable paterna')
-            ], fontsize=8)
-            ax2.spines['top'].set_visible(False)
-            ax2.spines['right'].set_visible(False)
-            plt.tight_layout()
-            st.pyplot(fig2)
-            plt.close()
-        except Exception:
-            st.info("SHAP disponible solo para XGBoost. Selecciona XGBoost en el sidebar para ver este gráfico.")
-
-    st.markdown("---")
-
-    # — COMPARACIÓN TODOS LOS ALGORITMOS —
-    st.subheader("⚖️ Comparación entre todos los algoritmos")
-    comp_data = []
-    for n, m in modelos.items():
-        p = m.predict(X_pp)[0]
-        pr = m.predict_proba(X_pp)[0]
-        comp_data.append({
-            'Algoritmo': n,
-            'Predicción': CLASES[p],
-            'Prob. BPN': f"{pr[0]*100:.1f}%",
-            'Prob. Adecuado': f"{pr[1]*100:.1f}%",
-            'Prob. Macrosomía': f"{pr[2]*100:.1f}%",
-            'Seleccionado': '✓' if n == algoritmo else ''
-        })
-    df_comp = pd.DataFrame(comp_data)
-    st.dataframe(df_comp.set_index('Algoritmo'), use_container_width=True)
-
-    # — RESUMEN CLÍNICO —
-    st.markdown("---")
-    st.subheader("📋 Resumen clínico para historia clínica")
-
-    cat_imc_m = ("Delgadez" if imc_materno<18.5 else "Normal" if imc_materno<25
-                 else "Sobrepeso" if imc_materno<30 else "Obesidad")
-    cat_imc_p = ("Delgadez" if imc_paterno<18.5 else "Normal" if imc_paterno<25
-                 else "Sobrepeso" if imc_paterno<30 else "Obesidad")
-
-    st.markdown(f"""
-    | Parámetro | Madre | Padre |
-    |-----------|-------|-------|
-    | IMC | {imc_materno} kg/m² ({cat_imc_m}) | {imc_paterno} kg/m² ({cat_imc_p}) |
-    | Hb ajustada (OPS Juliaca) | {hb_materna_ajust} g/dL {'⚠️ Anemia' if anemia_m else '✅'} | {hb_paterna_ajust} g/dL {'⚠️ Anemia' if anemia_p else '✅'} |
-    | Edad | {edad_materna} años | {edad_paterna} años |
-
-    **Predicción NutriML-Pareja ({algoritmo}):**
-    - Outcome neonatal esperado: **{clase_nombre}** (prob. {prob_pred:.1f}%)
-    - Ganancia de peso pregestacional: {ganancia_peso} kg
-    - Ferritina materna: {ferritina} μg/L {'⚠️ Deficiencia' if ferritina<15 else '✅'}
-    - Ácido fólico: {acido_folico} nmol/L {'⚠️ Deficiencia' if acido_folico<305 else '✅'}
-
-    *Sistema NutriML-Pareja · UNAJ Juliaca 2026 · Corrección Hb: −{FACTOR_OPS} g/dL (OPS, 3824 m s.n.m.)*
-    """)
-
-    st.caption("⚠️ Este resultado es de apoyo diagnóstico. La decisión clínica final corresponde al profesional de salud tratante.")
+st.caption("NutriML-Pareja · Universidad Nacional de Juliaca · Escuela Profesional de Ingeniería de Software y Sistemas · 2026")
